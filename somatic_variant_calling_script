@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Script for preprocessing human WGS paired-end reads using GATK Best Practices Workflow
+# Updated with reusable commands for different tools and paths
+
+echo "Running preprocessing workflow..."
+
+# Define tool paths and directories
+FASTQC_PATH=~/Downloads/FastQC/fastqc
+TRIM_GALORE_PATH=/home/shikhar/Downloads/tool/TrimGalore-0.6.10/trim_galore
+BWA_PATH=/home/shikhar/Downloads/tool/bwa
+SAMTOOLS_PATH=/home/shikhar/Downloads/tool/samtools-1.9/samtools
+PICARD_PATH=/home/shikhar/Downloads/tool/picard/build/libs/picard.jar
+REFERENCE_PATH=/home/shikhar/Downloads/refrence/Human_Genome.fna
+PROJECT_DIR=~/Downloads/dat_set
+TRIMMED_READ_DIR=$PROJECT_DIR/trimmed_read
+ALIGNMENT_RESULT_DIR=$PROJECT_DIR/Alignment_Result
+MARK_DUP_DIR=$PROJECT_DIR/add_read_group/MarkDuplicates
+VARIANT_CALLING_DIR=$MARK_DUP_DIR/Variant_calling
+THREADS=6
+
+# FastQC Quality Check Function
+run_fastqc() {
+    echo "Running FastQC on $1..."
+    $FASTQC_PATH $1 -t $THREADS
+}
+
+# FastQC for all reads
+run_fastqc $PROJECT_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R1_001.fastq.gz
+run_fastqc $PROJECT_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R2_001.fastq.gz
+run_fastqc $PROJECT_DIR/PA221MH-lib09-P19-Norm_S1_L001_R1_001.fastq.gz
+run_fastqc $PROJECT_DIR/PA221MH-lib09-P19-Norm_S1_L001_R2_001.fastq.gz
+
+# Trimming with Trim Galore Function
+run_trim_galore() {
+    echo "Running Trim Galore on $1 and $2..."
+    $TRIM_GALORE_PATH -q 30 --length 20 --paired $1 $2 -o $TRIMMED_READ_DIR
+}
+
+# Trim Galore for paired-end reads
+run_trim_galore $PROJECT_DIR/PA221MH-lib09-P19-Norm_S1_L001_R1_001.fastq.gz $PROJECT_DIR/PA221MH-lib09-P19-Norm_S1_L001_R2_001.fastq.gz
+run_trim_galore $PROJECT_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R1_001.fastq.gz $PROJECT_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R2_001.fastq.gz
+
+# BWA Alignment Function
+run_bwa_alignment() {
+    local READ1=$1
+    local READ2=$2
+    local OUTPUT=$3
+
+    echo "Running BWA alignment on $READ1 and $READ2..."
+    $BWA_PATH mem -t $THREADS $REFERENCE_PATH $READ1 $READ2 | \
+    $SAMTOOLS_PATH view -h -bS | \
+    $SAMTOOLS_PATH sort -o $OUTPUT
+}
+
+# Perform BWA Alignment
+run_bwa_alignment $TRIMMED_READ_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R1_001_val_1.fq.gz \
+                  $TRIMMED_READ_DIR/PA220KH-lib09-P19-Tumor_S2_L001_R2_001_val_2.fq.gz \
+                  $ALIGNMENT_RESULT_DIR/PA220KH-lib09-P19-Tumor_S2_L001.bam
+
+run_bwa_alignment $TRIMMED_READ_DIR/PA221MH-lib09-P19-Norm_S1_L001_R1_001_val_1.fq.gz \
+                  $TRIMMED_READ_DIR/PA221MH-lib09-P19-Norm_S1_L001_R2_001_val_2.fq.gz \
+                  $ALIGNMENT_RESULT_DIR/PA221MH-lib09-P19-Norm_S1_L001.bam
+
+# Samtools Flagstat Function
+run_flagstat() {
+    echo "Running Samtools flagstat on $1..."
+    $SAMTOOLS_PATH flagstat $1
+}
+
+# Flagstat for aligned BAM files
+run_flagstat $ALIGNMENT_RESULT_DIR/PA220KH-lib09-P19-Tumor_S2_L001.bam
+run_flagstat $ALIGNMENT_RESULT_DIR/PA221MH-lib09-P19-Norm_S1_L001.bam
+
+# Picard MarkDuplicates and AddOrReplaceReadGroups
+run_picard() {
+    local TOOL=$1
+    local INPUT=$2
+    local OUTPUT=$3
+    local ADDITIONAL_ARGS=$4
+
+    echo "Running Picard $TOOL on $INPUT..."
+    java -jar $PICARD_PATH $TOOL INPUT=$INPUT OUTPUT=$OUTPUT $ADDITIONAL_ARGS
+}
+
+# MarkDuplicates and Add Read Groups
+run_picard MarkDuplicates $ALIGNMENT_RESULT_DIR/PA220KH-lib09-P19-Tumor_S2_L001.bam \
+           $MARK_DUP_DIR/PA220KH_lib09_P19_Tumor_S2_L001_dedup.bam \
+           "REMOVE_DUPLICATES=true METRICS_FILE=Tumor_S2_metrics.txt CREATE_INDEX=true VALIDATION_STRINGENCY=LENIENT"
+
+run_picard AddOrReplaceReadGroups $ALIGNMENT_RESULT_DIR/PA221MH-lib09-P19-Norm_S1_L001.bam \
+           $MARK_DUP_DIR/PA221MH_lib09_P19_Norm_S1_L001_RG.bam \
+           "RGID=Normal_ID RGLB=Normal_LB RGPL=Normal_PL RGPU=Normal_PU RGSM=Normal_SM"
+
+run_picard AddOrReplaceReadGroups $ALIGNMENT_RESULT_DIR/PA220KH-lib09-P19-Tumor_S2_L001.bam \
+           $MARK_DUP_DIR/PA220KH_lib09_P19_Tumor_S2_L001_RG.bam \
+           "RGID=Tumor_ID RGLB=Tumor_LB RGPL=Tumor_PL RGPU=Tumor_PU RGSM=Tumor_SM"
+
+# GATK Mutect2 Variant Calling
+echo "Running GATK Mutect2..."
+gatk --java-options "-DGATK_STACKTRACE_ON_USER_EXCEPTION=true" Mutect2 \
+    -R $REFERENCE_PATH \
+    -I $MARK_DUP_DIR/PA220KH_lib09_P19_Tumor_S2_L001_RG.bam \
+    -I $MARK_DUP_DIR/PA221MH_lib09_P19_Norm_S1_L001_RG.bam \
+    -normal Normal_SM -tumor Tumor_SM \
+    -O $VARIANT_CALLING_DIR/Somatic_Variant_Tumor_Normal.vcf \
+    --native-pair-hmm-threads $THREADS
+
+# Validate Variants
+echo "Validating Variants..."
+gatk ValidateVariants -V $VARIANT_CALLING_DIR/Somatic_Variant_Tumor_Normal.vcf -R $REFERENCE_PATH
+
+echo "Workflow completed!"
+
